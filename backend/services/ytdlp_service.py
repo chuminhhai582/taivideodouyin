@@ -45,24 +45,131 @@ def _load_cookies_dict() -> dict:
 
 
 async def get_channel_videos(channel_url: str) -> dict:
-    """Lấy danh sách video từ kênh Douyin qua Douyin Web API"""
+    """Lấy danh sách video từ kênh Douyin"""
     sec_user_id = _extract_sec_user_id(channel_url)
     if not sec_user_id:
-        raise ValueError(
-            "URL không hợp lệ. Dùng dạng: https://www.douyin.com/user/xxxxx"
-        )
+        raise ValueError("URL không hợp lệ. Dùng dạng: https://www.douyin.com/user/xxxxx")
 
     cookies = _load_cookies_dict()
     if not cookies:
-        raise ValueError(
-            "Chưa có cookies. Vui lòng upload file cookies.txt trước."
-        )
+        raise ValueError("Chưa có cookies. Vui lòng upload file cookies.txt trước.")
 
     loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, _fetch_user_videos, sec_user_id, cookies)
+
+    # Thử API trước, nếu fail thì scrape HTML
+    try:
+        result = await loop.run_in_executor(None, _fetch_via_api, sec_user_id, cookies)
+        if result and result.get("videos"):
+            return result
+    except Exception:
+        pass
+
+    # Fallback: scrape từ HTML trang profile
+    return await loop.run_in_executor(None, _fetch_via_html, channel_url, cookies)
 
 
-def _fetch_user_videos(sec_user_id: str, cookies: dict) -> dict:
+def _fetch_via_html(channel_url: str, cookies: dict) -> dict:
+    """Scrape danh sách video từ HTML trang profile Douyin"""
+    import json as jsonlib
+
+    session = requests.Session()
+    session.headers.update({
+        **COMMON_HEADERS,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Upgrade-Insecure-Requests": "1",
+    })
+    session.cookies.update(cookies)
+
+    clean_url = re.sub(r'\?.*', '', channel_url.strip()).rstrip("/") + "/"
+    resp = session.get(clean_url, timeout=20)
+    html = resp.text
+
+    # Tìm JSON data được nhúng trong thẻ <script id="RENDER_DATA">
+    match = re.search(r'<script id="RENDER_DATA" type="application/json">(.*?)</script>', html, re.DOTALL)
+    if not match:
+        # Thử tìm window.__INITIAL_STATE__
+        match = re.search(r'window\.__INITIAL_STATE__\s*=\s*(\{.*?\});\s*\(', html, re.DOTALL)
+
+    if not match:
+        raise ValueError(
+            "Không thể lấy dữ liệu từ trang Douyin. "
+            "Hãy export lại cookies sau khi đăng nhập và thử lại."
+        )
+
+    raw = match.group(1)
+    # URL decode nếu cần
+    from urllib.parse import unquote
+    try:
+        raw = unquote(raw)
+    except Exception:
+        pass
+
+    try:
+        data = jsonlib.loads(raw)
+    except Exception:
+        raise ValueError("Không thể parse dữ liệu từ trang Douyin.")
+
+    # Tìm video list trong cấu trúc JSON
+    videos = []
+    channel_name = "Unknown"
+    channel_id = ""
+
+    def _search(obj, depth=0):
+        nonlocal channel_name, channel_id
+        if depth > 10 or not isinstance(obj, (dict, list)):
+            return
+        if isinstance(obj, list):
+            for item in obj:
+                _search(item, depth + 1)
+            return
+        # Tìm aweme_id (id video Douyin)
+        if "aweme_id" in obj or ("aweme_list" in obj):
+            aweme_list = obj.get("aweme_list") or ([obj] if "aweme_id" in obj else [])
+            for item in aweme_list:
+                if not isinstance(item, dict):
+                    continue
+                vid_id = item.get("aweme_id") or item.get("id")
+                if not vid_id:
+                    continue
+                author = item.get("author") or {}
+                if channel_name == "Unknown" and author.get("nickname"):
+                    channel_name = author["nickname"]
+                    channel_id = author.get("sec_uid") or ""
+                cover = (item.get("video") or {}).get("cover") or {}
+                thumb_urls = cover.get("url_list") or []
+                stats = item.get("statistics") or {}
+                duration_ms = (item.get("video") or {}).get("duration") or 0
+                videos.append(VideoInfo(
+                    id=str(vid_id),
+                    title=item.get("desc") or "Untitled",
+                    thumbnail=thumb_urls[0] if thumb_urls else None,
+                    duration=int(duration_ms / 1000) if duration_ms else None,
+                    url=f"https://www.douyin.com/video/{vid_id}",
+                    view_count=(stats.get("play_count") or stats.get("view_count")),
+                    like_count=stats.get("digg_count"),
+                    upload_date=str(item.get("create_time") or ""),
+                ))
+            return
+        for v in obj.values():
+            _search(v, depth + 1)
+
+    _search(data)
+
+    if not videos:
+        raise ValueError(
+            "Trang tải được nhưng không tìm thấy video. "
+            "Thử export cookies mới từ Chrome khi đang xem trang kênh đó."
+        )
+
+    return {
+        "channel_name": channel_name,
+        "channel_id": channel_id,
+        "videos": videos,
+        "total": len(videos),
+    }
+
+
+def _fetch_via_api(sec_user_id: str, cookies: dict) -> dict:
     """Gọi Douyin API lấy toàn bộ video của user"""
     session = requests.Session()
     session.headers.update({
