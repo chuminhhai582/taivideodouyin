@@ -1,15 +1,13 @@
-import anthropic
 import asyncio
 import os
-import re
 from typing import List
+from deep_translator import GoogleTranslator
 from ..models.schemas import SubtitleSegment
 
 SUBTITLE_DIR = os.environ.get("SUBTITLE_DIR", "/tmp/douyin_subtitles")
 os.makedirs(SUBTITLE_DIR, exist_ok=True)
 
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
-BATCH_SIZE = 30  # Số segment dịch mỗi lần gọi API
+BATCH_SIZE = 50  # Google Translate xử lý được nhiều hơn mỗi lần
 
 
 def _segments_to_srt(segments: List[SubtitleSegment]) -> str:
@@ -19,57 +17,54 @@ def _segments_to_srt(segments: List[SubtitleSegment]) -> str:
     return "\n".join(lines)
 
 
-def _parse_translated_batch(raw: str, original_segments: List[SubtitleSegment]) -> List[SubtitleSegment]:
-    """Parse kết quả dịch từ Claude, ghép lại với timestamp gốc"""
-    lines = [l.strip() for l in raw.strip().split("\n") if l.strip()]
-    translated = []
-    for i, seg in enumerate(original_segments):
-        text = lines[i] if i < len(lines) else seg.text
-        translated.append(SubtitleSegment(
-            index=seg.index,
-            start=seg.start,
-            end=seg.end,
-            text=text,
-        ))
-    return translated
-
-
 async def translate_segments(
     segments: List[SubtitleSegment],
-    source_lang: str = "zh",
+    source_lang: str = "zh-CN",
     target_lang: str = "vi",
 ) -> List[SubtitleSegment]:
-    """Dịch các segment phụ đề sang tiếng Việt bằng Claude API"""
-    if not ANTHROPIC_API_KEY:
-        raise ValueError("Chưa cấu hình ANTHROPIC_API_KEY")
+    """Dịch phụ đề sang tiếng Việt bằng Google Translate (miễn phí, không cần API key)"""
 
-    client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
+    # Map mã ngôn ngữ Whisper → Google Translate
+    lang_map = {
+        "zh": "zh-CN",
+        "chinese": "zh-CN",
+        "en": "en",
+        "ja": "ja",
+        "ko": "ko",
+    }
+    src = lang_map.get(source_lang, "zh-CN")
+
+    def _translate_batch(texts: List[str]) -> List[str]:
+        # Ghép các dòng bằng ký tự phân cách đặc biệt để dịch 1 lần
+        SEPARATOR = " ||| "
+        combined = SEPARATOR.join(texts)
+        translator = GoogleTranslator(source=src, target=target_lang)
+        translated = translator.translate(combined)
+        if not translated:
+            return texts
+        parts = translated.split("|||")
+        # Đảm bảo đủ số dòng
+        result = [p.strip() for p in parts]
+        while len(result) < len(texts):
+            result.append(texts[len(result)])
+        return result[:len(texts)]
+
     translated_all = []
+    loop = asyncio.get_event_loop()
 
-    # Chia batch để tránh vượt token limit
     for i in range(0, len(segments), BATCH_SIZE):
         batch = segments[i:i + BATCH_SIZE]
-        texts = "\n".join(seg.text for seg in batch)
+        texts = [seg.text for seg in batch]
 
-        prompt = f"""Dịch các dòng phụ đề sau từ tiếng Trung sang tiếng Việt.
-Yêu cầu quan trọng:
-- Mỗi dòng đầu vào tương ứng đúng 1 dòng đầu ra
-- Giữ nguyên số lượng dòng, KHÔNG thêm hoặc bỏ dòng nào
-- Dịch tự nhiên, phù hợp với ngữ cảnh video
-- Không thêm giải thích, chỉ trả về bản dịch
+        translated_texts = await loop.run_in_executor(None, _translate_batch, texts)
 
-Phụ đề cần dịch:
-{texts}"""
-
-        message = await client.messages.create(
-            model="claude-opus-4-6",
-            max_tokens=2048,
-            messages=[{"role": "user", "content": prompt}],
-        )
-
-        translated_text = message.content[0].text
-        translated_batch = _parse_translated_batch(translated_text, batch)
-        translated_all.extend(translated_batch)
+        for seg, translated_text in zip(batch, translated_texts):
+            translated_all.append(SubtitleSegment(
+                index=seg.index,
+                start=seg.start,
+                end=seg.end,
+                text=translated_text,
+            ))
 
     return translated_all
 
