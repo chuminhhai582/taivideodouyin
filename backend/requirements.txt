@@ -1,7 +1,7 @@
 fastapi==0.111.0
 uvicorn[standard]==0.30.1
-yt-dlp==2024.5.27
-openai-whisper==20231117
+yt-dlp
+openai-whisper
 deep-translator==1.11.4
 ffmpeg-python==0.2.0
 websockets==12.0
@@ -12,6 +12,5 @@ pydantic==2.7.3
 pydantic-settings==2.3.1
 python-dotenv==1.0.1
 requests==2.32.3
-torch==2.3.0
-torchaudio==2.3.0
-numpy==1.26.4
+setuptools
+numpy
