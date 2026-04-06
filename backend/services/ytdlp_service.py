@@ -3,7 +3,7 @@ import asyncio
 import os
 import re
 from typing import List, Optional, Callable
-from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
+from urllib.parse import urlparse, urlunparse
 from ..models.schemas import VideoInfo
 
 DOWNLOAD_DIR = os.environ.get("DOWNLOAD_DIR", "/tmp/douyin_downloads")
@@ -15,97 +15,78 @@ COMMON_HEADERS = {
     "Accept-Language": "zh-CN,zh;q=0.9",
 }
 
+# Trình duyệt để thử lấy cookie (theo thứ tự ưu tiên)
+BROWSERS_TO_TRY = ["chrome", "edge", "firefox", "opera", "brave", "chromium"]
+
 
 def _sanitize_filename(name: str) -> str:
     return re.sub(r'[\\/*?:"<>|]', "_", name)
 
 
-def _normalize_douyin_url(url: str) -> str:
-    """Chuẩn hoá URL Douyin, bỏ query params thừa"""
+def _clean_url(url: str) -> str:
+    """Bỏ query string, giữ path sạch"""
     parsed = urlparse(url.strip())
-    # Giữ lại path, bỏ query string
-    clean = urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", "", ""))
-    # Đảm bảo có trailing slash
-    if not clean.endswith("/"):
-        clean += "/"
-    return clean
+    return urlunparse((parsed.scheme, parsed.netloc, parsed.path.rstrip("/") + "/", "", "", ""))
 
 
-def _build_url_variants(url: str) -> list:
-    """Tạo danh sách URL để thử lần lượt"""
-    url = url.strip()
-    parsed = urlparse(url)
-    path = parsed.path.rstrip("/")
-
-    variants = [
-        # Dạng chuẩn có trailing slash
-        f"https://www.douyin.com{path}/",
-        # Dạng không trailing slash
-        f"https://www.douyin.com{path}",
-        # Thử với tên miền khác
-        f"https://www.iesdouyin.com{path}/",
-        # URL gốc
-        url,
-    ]
-    # Loại trùng
-    seen = set()
-    result = []
-    for v in variants:
-        if v not in seen:
-            seen.add(v)
-            result.append(v)
-    return result
-
-
-async def get_channel_videos(channel_url: str) -> dict:
-    """Lấy danh sách video từ kênh Douyin, thử nhiều URL variants"""
-
-    ydl_opts = {
-        "quiet": False,
-        "no_warnings": False,
-        "extract_flat": True,
+def _make_ydl_opts(use_browser_cookies: Optional[str] = None, flat: bool = True) -> dict:
+    opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "extract_flat": flat,
         "playlistend": 200,
         "http_headers": COMMON_HEADERS,
         "socket_timeout": 30,
+        "ignoreerrors": True,
     }
+    if use_browser_cookies:
+        opts["cookiesfrombrowser"] = (use_browser_cookies,)
+    return opts
 
-    url_variants = _build_url_variants(channel_url)
-    last_error = None
 
-    def _extract(try_url: str):
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(try_url, download=False)
-            return info
-
+async def get_channel_videos(channel_url: str) -> dict:
+    """
+    Lấy danh sách video từ kênh Douyin.
+    Tự động thử lấy cookie từ Chrome/Edge nếu cần.
+    """
+    clean_url = _clean_url(channel_url)
     loop = asyncio.get_event_loop()
 
-    for try_url in url_variants:
+    def _extract(browser_cookie: Optional[str]) -> Optional[dict]:
+        opts = _make_ydl_opts(use_browser_cookies=browser_cookie, flat=True)
         try:
-            info = await loop.run_in_executor(None, _extract, try_url)
-            if info:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(clean_url, download=False)
+                return info
+        except Exception:
+            return None
+
+    info = None
+
+    # Thử 1: Không cần cookie
+    info = await loop.run_in_executor(None, _extract, None)
+
+    # Thử 2-N: Lần lượt từng trình duyệt nếu chưa lấy được video
+    if not info or not _has_videos(info):
+        for browser in BROWSERS_TO_TRY:
+            result = await loop.run_in_executor(None, _extract, browser)
+            if result and _has_videos(result):
+                info = result
                 break
-        except Exception as e:
-            last_error = e
-            continue
-    else:
+
+    if not info:
         raise ValueError(
-            f"Không thể lấy thông tin kênh. "
-            f"Lỗi: {str(last_error)}. "
-            f"Hãy thử paste URL kênh trực tiếp từ trình duyệt."
+            "Không thể lấy thông tin kênh. "
+            "Hãy đảm bảo bạn đang đăng nhập Douyin trên Chrome/Edge và thử lại."
         )
 
     channel_name = (
-        info.get("uploader")
-        or info.get("channel")
-        or info.get("title")
-        or "Unknown"
+        info.get("uploader") or info.get("channel") or info.get("title") or "Unknown"
     )
     channel_id = info.get("uploader_id") or info.get("channel_id") or ""
 
     videos = []
     entries = info.get("entries") or []
-
-    # Nếu không có entries nhưng có id thì đây là 1 video đơn lẻ
     if not entries and info.get("id"):
         entries = [info]
 
@@ -118,7 +99,9 @@ async def get_channel_videos(channel_url: str) -> dict:
             or entry.get("url")
             or (f"https://www.douyin.com/video/{vid_id}" if vid_id else "")
         )
-        vid = VideoInfo(
+        if not vid_id:
+            continue
+        videos.append(VideoInfo(
             id=vid_id,
             title=entry.get("title") or entry.get("description") or "Untitled",
             thumbnail=entry.get("thumbnail"),
@@ -127,9 +110,13 @@ async def get_channel_videos(channel_url: str) -> dict:
             view_count=entry.get("view_count"),
             like_count=entry.get("like_count"),
             upload_date=entry.get("upload_date"),
+        ))
+
+    if not videos:
+        raise ValueError(
+            "Kết nối được kênh nhưng không tìm thấy video. "
+            "Vui lòng đăng nhập Douyin trên trình duyệt Chrome hoặc Edge rồi thử lại."
         )
-        if vid.id:
-            videos.append(vid)
 
     return {
         "channel_name": channel_name,
@@ -139,13 +126,18 @@ async def get_channel_videos(channel_url: str) -> dict:
     }
 
 
+def _has_videos(info: dict) -> bool:
+    entries = info.get("entries") or []
+    return len([e for e in entries if e and e.get("id")]) > 0
+
+
 async def download_video(
     video_url: str,
     video_id: str,
     video_title: str,
     progress_callback: Optional[Callable] = None,
 ) -> str:
-    """Tải video không watermark, trả về đường dẫn file"""
+    """Tải video không watermark"""
     safe_title = _sanitize_filename(video_title)[:50]
     output_template = os.path.join(DOWNLOAD_DIR, f"{video_id}_{safe_title}.%(ext)s")
 
@@ -159,31 +151,37 @@ async def download_video(
                     progress_callback(pct), asyncio.get_event_loop()
                 )
 
-    ydl_opts = {
-        "outtmpl": output_template,
-        "quiet": True,
-        "no_warnings": True,
-        "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
-        "merge_output_format": "mp4",
-        "http_headers": COMMON_HEADERS,
-        "progress_hooks": [_progress_hook],
-        "extractor_args": {
-            "douyin": {"watermark": ["no"]}
-        },
-        "postprocessors": [{
-            "key": "FFmpegVideoConvertor",
-            "preferedformat": "mp4",
-        }],
-    }
+    def _download(browser_cookie: Optional[str]):
+        opts = {
+            "outtmpl": output_template,
+            "quiet": True,
+            "no_warnings": True,
+            "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+            "merge_output_format": "mp4",
+            "http_headers": COMMON_HEADERS,
+            "progress_hooks": [_progress_hook],
+            "extractor_args": {"douyin": {"watermark": ["no"]}},
+            "postprocessors": [{"key": "FFmpegVideoConvertor", "preferedformat": "mp4"}],
+        }
+        if browser_cookie:
+            opts["cookiesfrombrowser"] = (browser_cookie,)
 
-    def _download():
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        with yt_dlp.YoutubeDL(opts) as ydl:
             ydl.download([video_url])
+
         for f in os.listdir(DOWNLOAD_DIR):
             if f.startswith(video_id) and f.endswith(".mp4"):
                 return os.path.join(DOWNLOAD_DIR, f)
         raise FileNotFoundError(f"Không tìm thấy file video sau khi tải: {video_id}")
 
     loop = asyncio.get_event_loop()
-    output_path = await loop.run_in_executor(None, _download)
-    return output_path
+
+    # Thử không cookie trước, sau đó thử từng browser
+    for browser in [None] + BROWSERS_TO_TRY:
+        try:
+            output_path = await loop.run_in_executor(None, _download, browser)
+            return output_path
+        except Exception as e:
+            if browser == BROWSERS_TO_TRY[-1]:
+                raise
+            continue
