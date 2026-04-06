@@ -74,58 +74,63 @@ async def get_channel_videos(channel_url: str) -> dict:
         raise ValueError("Chưa có cookies. Vui lòng upload file cookies.txt trước.")
 
     try:
-        from playwright.async_api import async_playwright
+        import playwright
     except ImportError:
         raise ValueError(
-            "Chưa cài Playwright. Chạy lệnh: py -m playwright install chromium"
+            "Chưa cài Playwright. Chạy: py -m pip install playwright && py -m playwright install chromium"
         )
 
     clean_url = re.sub(r'\?.*', '', channel_url.strip()).rstrip("/") + "/"
     cookies = _load_cookies_for_playwright()
+
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, _scrape_with_playwright_sync, clean_url, cookies, sec_user_id)
+
+
+def _scrape_with_playwright_sync(clean_url: str, cookies: list, sec_user_id: str) -> dict:
+    """Dùng Playwright sync API trong thread riêng (tương thích Windows)"""
+    from playwright.sync_api import sync_playwright
+
     videos = []
     channel_name = "Unknown"
     channel_id = sec_user_id
-    captured_responses = []
+    captured = []
 
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        context = await browser.new_context(
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        context = browser.new_context(
             user_agent=COMMON_HEADERS["User-Agent"],
             locale="zh-CN",
             viewport={"width": 1920, "height": 1080},
         )
 
-        # Load cookies
         if cookies:
-            await context.add_cookies(cookies)
+            context.add_cookies(cookies)
 
-        page = await context.new_page()
+        page = context.new_page()
 
-        # Bắt response từ Douyin API
-        async def handle_response(response):
+        def handle_response(response):
             if "aweme/v1/web/aweme/post" in response.url:
                 try:
-                    body = await response.json()
+                    body = response.json()
                     if body.get("status_code") == 0:
-                        captured_responses.append(body)
+                        captured.append(body)
                 except Exception:
                     pass
 
         page.on("response", handle_response)
 
-        # Truy cập trang kênh
-        await page.goto(clean_url, wait_until="networkidle", timeout=30000)
-        # Scroll để load thêm video
-        for _ in range(5):
-            await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-            await asyncio.sleep(1.5)
+        page.goto(clean_url, wait_until="networkidle", timeout=30000)
 
-        await browser.close()
+        # Scroll xuống để load thêm video
+        for _ in range(6):
+            page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            page.wait_for_timeout(1500)
 
-    # Xử lý responses đã bắt được
-    for resp_data in captured_responses:
-        aweme_list = resp_data.get("aweme_list") or []
-        for item in aweme_list:
+        browser.close()
+
+    for resp_data in captured:
+        for item in (resp_data.get("aweme_list") or []):
             vid_id = item.get("aweme_id", "")
             if not vid_id:
                 continue
@@ -151,10 +156,9 @@ async def get_channel_videos(channel_url: str) -> dict:
     if not videos:
         raise ValueError(
             "Không tìm thấy video. Cookies có thể hết hạn. "
-            "Hãy đăng xuất, đăng nhập lại Douyin trên Chrome, rồi export cookies mới."
+            "Hãy đăng xuất, đăng nhập lại Douyin rồi export cookies mới."
         )
 
-    # Loại trùng
     seen = set()
     unique = []
     for v in videos:
