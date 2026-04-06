@@ -74,6 +74,10 @@ def _fetch_user_videos(sec_user_id: str, cookies: dict) -> dict:
     })
     session.cookies.update(cookies)
 
+    # Lấy msToken từ cookies (cần thiết cho Douyin API)
+    ms_token = cookies.get("msToken", "")
+    ttwid = cookies.get("ttwid", "")
+
     videos = []
     max_cursor = 0
     has_more = True
@@ -99,6 +103,7 @@ def _fetch_user_videos(sec_user_id: str, cookies: dict) -> dict:
             "browser_platform": "Win32",
             "browser_name": "Chrome",
             "browser_version": "124.0.0.0",
+            "msToken": ms_token,
         }
 
         try:
@@ -107,7 +112,16 @@ def _fetch_user_videos(sec_user_id: str, cookies: dict) -> dict:
                 params=params,
                 timeout=15,
             )
+            raw = resp.text
+            if not raw or not raw.strip():
+                raise ValueError(
+                    "Douyin API trả về response rỗng. "
+                    "Cookies có thể hết hạn hoặc bị chặn. "
+                    "Hãy đăng xuất và đăng nhập lại Douyin trên Chrome, rồi export cookies mới."
+                )
             data = resp.json()
+        except ValueError:
+            raise
         except Exception as e:
             raise ValueError(f"Lỗi kết nối Douyin API: {str(e)}")
 
@@ -116,7 +130,7 @@ def _fetch_user_videos(sec_user_id: str, cookies: dict) -> dict:
             msg = data.get("status_msg") or f"status_code={status}"
             raise ValueError(
                 f"Douyin API lỗi: {msg}. "
-                "Cookies có thể đã hết hạn, thử upload cookies mới."
+                "Thử export cookies mới từ Chrome và upload lại."
             )
 
         aweme_list = data.get("aweme_list") or []
