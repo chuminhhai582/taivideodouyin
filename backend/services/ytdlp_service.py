@@ -18,6 +18,9 @@ COMMON_HEADERS = {
 # Trình duyệt để thử lấy cookie (theo thứ tự ưu tiên)
 BROWSERS_TO_TRY = ["chrome", "edge", "firefox", "opera", "brave", "chromium"]
 
+# Đường dẫn file cookies.txt thủ công
+COOKIES_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "cookies.txt")
+
 
 def _sanitize_filename(name: str) -> str:
     return re.sub(r'[\\/*?:"<>|]', "_", name)
@@ -39,7 +42,10 @@ def _make_ydl_opts(use_browser_cookies: Optional[str] = None, flat: bool = True)
         "socket_timeout": 30,
         "ignoreerrors": True,
     }
-    if use_browser_cookies:
+    # Ưu tiên file cookies.txt thủ công
+    if os.path.exists(COOKIES_FILE):
+        opts["cookiefile"] = COOKIES_FILE
+    elif use_browser_cookies:
         opts["cookiesfrombrowser"] = (use_browser_cookies,)
     return opts
 

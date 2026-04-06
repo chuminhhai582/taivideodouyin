@@ -112,6 +112,18 @@ export const uploadToTikTok = async (params: {
 export const getDownloadFileUrl = (jobId: string) =>
   `${API_BASE}/download/file/${jobId}`;
 
+export const uploadCookies = async (file: File) => {
+  const form = new FormData();
+  form.append("file", file);
+  const res = await api.post("/settings/cookies/upload", form);
+  return res.data;
+};
+
+export const getCookiesStatus = async (): Promise<{ has_cookies: boolean; size_bytes: number }> => {
+  const res = await api.get("/settings/cookies/status");
+  return res.data;
+};
+
 // ── WebSocket ──────────────────────────────────────────────────────────────
 export const createJobWebSocket = (jobId: string): WebSocket => {
   const WS_BASE = (process.env.NEXT_PUBLIC_WS_URL || "ws://localhost:8000").replace(/^http/, "ws");

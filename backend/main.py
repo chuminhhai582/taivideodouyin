@@ -6,7 +6,7 @@ import os
 
 load_dotenv()
 
-from .routers import channel, download, jobs, subtitle, tiktok
+from .routers import channel, download, jobs, subtitle, tiktok, settings
 
 app = FastAPI(
     title="Douyin → TikTok Việt Hóa",
@@ -27,6 +27,7 @@ app.include_router(download.router)
 app.include_router(jobs.router)
 app.include_router(subtitle.router)
 app.include_router(tiktok.router)
+app.include_router(settings.router)
 
 OUTPUT_DIR = os.environ.get("OUTPUT_DIR", "/tmp/douyin_output")
 os.makedirs(OUTPUT_DIR, exist_ok=True)

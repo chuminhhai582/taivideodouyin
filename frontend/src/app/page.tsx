@@ -3,6 +3,7 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import ChannelInput from "@/components/ChannelInput";
 import VideoGrid from "@/components/VideoGrid";
+import CookiesUpload from "@/components/CookiesUpload";
 import { ChannelVideosResponse } from "@/lib/api";
 import { CheckCircle } from "lucide-react";
 import Link from "next/link";
@@ -35,6 +36,9 @@ export default function HomePage() {
           ))}
         </div>
       </div>
+
+      {/* Cookies */}
+      <CookiesUpload />
 
       {/* Input */}
       <ChannelInput onResult={(data) => { setChannelData(data); setCreatedJobs([]); }} />
